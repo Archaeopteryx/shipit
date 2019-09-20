@@ -4,6 +4,17 @@ policy:
 tasks:
   $let:
     python_version: 'py37'
+    release_channel:
+      $if: 'tasks_for == "github-pull-request"'
+      then: 'none'
+      else:
+        $if: 'tasks_for == "github-push" && event.ref in ["refs/heads/dev", "refs/heads/testing", "refs/heads/staging", "refs/heads/production"]'
+        then: '${event.ref[11:}'
+        else: 'none'
+    ui_bucket:
+      $if: 'release_channel == "production"'
+      then: 'relengstatic-prod-shipitfrontend-static-website'
+      else: 'relengstatic-${release_channel}-shipitfrontend-static-website'
 
     # Github events have this stuff in different places...
     repo_url:
@@ -35,7 +46,7 @@ tasks:
       then: 'pull-request'
       else:
         $if: 'tasks_for == "github-push" && event.ref[0:11] == "refs/heads/"'
-        then: 'shipit_api_dockerflow_${event.ref[11:]}'
+        then: 'shipit_api_dockerflow_${release_channel}'
         else: 'unknown'
     push_docker_image:
       $if: 'tasks_for == "github-pull-request"'
@@ -62,8 +73,8 @@ tasks:
                   - /bin/bash
                   - -c
                   - >-
-                    git clone ${repo_url} shipit_api &&
-                    cd shipit_api/api &&
+                    git clone ${repo_url} shipit &&
+                    cd shipit/api &&
                     git checkout ${head_sha} &&
                     pip install tox &&
                     tox -e ${py[0]}
@@ -85,8 +96,8 @@ tasks:
                 - /bin/bash
                 - -c
                 - >-
-                  git clone ${repo_url} shipit_api &&
-                  cd shipit_api/frontend &&
+                  git clone ${repo_url} shipit &&
+                  cd shipit/frontend &&
                   git checkout ${head_sha} &&
                   yarn install &&
                   yarn test
@@ -152,3 +163,34 @@ tasks:
               description: Ship It API docker build
               owner: ${owner_email}
               source: ${repo_url}
+
+          - $if: 'ui_bucket != "none"'
+            then:
+              - taskId: {$eval: as_slugid("ui-deploy")}
+                created: {$fromNow: ''}
+                deadline: {$fromNow: '2 hours'}
+                provisionerId: aws-provisioner-v1
+                workerType: github-worker
+                scopes:
+                  $if: 'push_docker_image == "0"'
+                  then: []
+                  else:
+                    - 'secrets:get:project/releng/shipit/deploy'
+                routes: []
+                payload:
+                  env:
+                    DEPLOY_SECRET: http://taskcluster/secrets/v1/secret/project/releng/shipit/deploy
+                    WEBSITE_BUCKET: '${ui_bucket}'
+                  maxRunTime: 3600
+                  image: "node:current"
+                  command:
+                    - "/bin/bash"
+                    - "-c"
+                    - "apt-get -q --yes update && apt-get -q --yes install awscli && git clone ${repo_url} shipit && cd shipit/frontend && git checkout ${head_sha} && yarn install && bash ./scripts/deploy"
+                  features:
+                    taskclusterProxy: true
+                metadata:
+                  name: Ship It ${release_channel} ui deploy
+                  description: Balrog ${release_channel} ui deploy
+                  owner: ${owner_email}
+                  source: ${repo_url}
